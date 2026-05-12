@@ -94,76 +94,254 @@ def generate_ae_latex_table(config: Config) -> None:
     logger.info(f"AutoEncoder LaTeX table generated and saved to {out_path}")
 
 
-def generate_accuracy_latex_table(config: Config) -> None:
+def generate_accuracy_latex_table(config: Config, show_ci: bool = False) -> None:
     """Generate a LaTeX table reporting per-player move prediction accuracies.
 
-    The table contains absolute accuracies for each method and the delta
-    relative to the Maia-2 baseline presented in parentheses.
+    The table contains absolute accuracies for each method and either the delta
+    relative to the Maia-2 baseline (default) or, when bootstrap statistics are
+    available, the standard deviation or percentile CI similar to the JSD table.
+
+    Args:
+        config: project configuration with paths
+        show_ci: if True prefer to display CI endpoints when available; otherwise
+                 display standard deviation when present.
     """
 
     # Load per-player accuracies
     df_acc = pl.read_parquet(config.paths.accuracy_path).sort("player_name")
 
-    # Compute global means (average across players)
-    overall_baseline = df_acc.select(pl.col("baseline_accuracy").mean()).item()
-    overall_custom = df_acc.select(pl.col("custom_accuracy").mean()).item()
-    overall_mcts = df_acc.select(pl.col("mcts_accuracy").mean()).item()
+    # Determine available columns for std/CI for each prefix
+    columns = set(df_acc.columns)
 
-    # Formatage des lignes du tableau
+    def _find_ci_cols(prefix: str):
+        lower = next((c for c in columns if c.startswith(f"{prefix}_ci_lower")), None)
+        upper = next((c for c in columns if c.startswith(f"{prefix}_ci_upper")), None)
+        return lower, upper
+
+    def _std_col(prefix: str):
+        # compute_acc writes e.g. "baseline_bs_std"; tolerate some variants
+        candidates = [
+            f"{prefix}_bs_std",
+            f"{prefix}_std",
+            f"{prefix}_std_dev",
+            f"{prefix}_sigma",
+        ]
+        for c in candidates:
+            if c in columns:
+                return c
+        return None
+
     latex_rows = []
+
     for row in df_acc.iter_rows(named=True):
         name = row["player_name"]
 
-        # Baseline en valeur absolue
-        acc_b = f"{row['baseline_accuracy'] * 100:.1f}\\%"
+        # Baseline
+        b_val = row.get("baseline_accuracy", float("nan"))
+        b_std_col = _std_col("baseline")
+        b_ci_l_col, b_ci_u_col = _find_ci_cols("baseline")
 
-        # Custom : Absolu + Delta
-        abs_c = row["custom_accuracy"] * 100
-        delta_c = (row["custom_accuracy"] - row["baseline_accuracy"]) * 100
-        acc_c = f"{abs_c:.1f}\\% ({delta_c:+.1f}\\%)"
+        if b_val == b_val:
+            b_abs = b_val * 100
+            # Prefer CI if requested and available
+            b_ci_l = row.get(b_ci_l_col) if b_ci_l_col else float("nan")
+            b_ci_u = row.get(b_ci_u_col) if b_ci_u_col else float("nan")
+            b_std = row.get(b_std_col) if b_std_col else float("nan")
 
-        # MCTS : Absolu + Delta
-        abs_m = row["mcts_accuracy"] * 100
-        delta_m = (row["mcts_accuracy"] - row["baseline_accuracy"]) * 100
-        acc_m = f"{abs_m:.1f}\\% ({delta_m:+.1f}\\%)"
+            if show_ci and b_ci_l == b_ci_l and b_ci_u == b_ci_u:
+                b_str = f"{b_abs:.1f}\\% ({b_ci_l * 100:.1f}-{b_ci_u * 100:.1f}\\%)"
+            elif b_std == b_std:
+                b_str = f"${b_abs:.1f}\\%\\pm{b_std * 100:.1f}\\%$"
+            else:
+                b_str = f"{b_abs:.1f}\\%"
+        else:
+            b_str = "N/A"
 
-        latex_rows.append(
-            f"                         {name} & {acc_b} & {acc_c} & {acc_m} \\\\"
+        # Custom
+        c_val = row.get("custom_accuracy", float("nan"))
+        c_std_col = _std_col("custom")
+        c_ci_l_col, c_ci_u_col = _find_ci_cols("custom")
+        c_delta = (
+            (c_val - b_val) * 100
+            if (c_val == c_val and b_val == b_val)
+            else float("nan")
         )
 
-    # Append a row with global averages
+        if c_val == c_val:
+            c_abs = c_val * 100
+            c_ci_l = row.get(c_ci_l_col) if c_ci_l_col else float("nan")
+            c_ci_u = row.get(c_ci_u_col) if c_ci_u_col else float("nan")
+            c_std = row.get(c_std_col) if c_std_col else float("nan")
+
+            if show_ci and c_ci_l == c_ci_l and c_ci_u == c_ci_u:
+                c_str = f"{c_abs:.1f}\\% ({c_ci_l * 100:.1f}-{c_ci_u * 100:.1f}\\%)"
+            elif c_std == c_std:
+                c_str = f"{c_abs:.1f}\\% $\\pm{c_std * 100:.1f}\\%$"
+            else:
+                c_str = f"{c_abs:.1f}\\% ({c_delta:+.1f}\\%)"
+        else:
+            c_str = "N/A"
+
+        # MCTS
+        m_val = row.get("mcts_accuracy", float("nan"))
+        m_std_col = _std_col("mcts")
+        m_ci_l_col, m_ci_u_col = _find_ci_cols("mcts")
+        m_delta = (
+            (m_val - b_val) * 100
+            if (m_val == m_val and b_val == b_val)
+            else float("nan")
+        )
+
+        if m_val == m_val:
+            m_abs = m_val * 100
+            m_ci_l = row.get(m_ci_l_col) if m_ci_l_col else float("nan")
+            m_ci_u = row.get(m_ci_u_col) if m_ci_u_col else float("nan")
+            m_std = row.get(m_std_col) if m_std_col else float("nan")
+
+            if show_ci and m_ci_l == m_ci_l and m_ci_u == m_ci_u:
+                m_str = f"{m_abs:.1f}\\% ({m_ci_l * 100:.1f}-{m_ci_u * 100:.1f}\\%)"
+            elif m_std == m_std:
+                m_str = f"{m_abs:.1f}\\% $\\pm{m_std * 100:.1f}\\%$"
+            else:
+                m_str = f"{m_abs:.1f}\\% ({m_delta:+.1f}\\%)"
+        else:
+            m_str = "N/A"
+
+        latex_rows.append(
+            f"                         {name} & {b_str} & {c_str} & {m_str} \\\\"
+        )
+
+    # Append average row: compute means across players and mean std/CI endpoints when present
     latex_rows.append("                         \\hline")
 
-    # Compute deltas for the global averages
-    avg_abs_c = overall_custom * 100
-    avg_delta_c = (overall_custom - overall_baseline) * 100
-    avg_c_str = f"{avg_abs_c:.1f}\\% ({avg_delta_c:+.1f}\\%)"
+    def _mean_col(col_name: str):
+        if not col_name or col_name not in columns:
+            return float("nan")
+        vals = [r[col_name] for r in df_acc.iter_rows(named=True)]
+        nums = [v for v in vals if isinstance(v, (int, float)) and not np.isnan(v)]
+        return float(np.mean(nums)) if nums else float("nan")
 
-    avg_abs_m = overall_mcts * 100
-    avg_delta_m = (overall_mcts - overall_baseline) * 100
-    avg_m_str = f"{avg_abs_m:.1f}\\% ({avg_delta_m:+.1f}\\%)"
+    overall_baseline = _mean_col("baseline_accuracy")
+    overall_custom = _mean_col("custom_accuracy")
+    overall_mcts = _mean_col("mcts_accuracy")
 
-    latex_rows.append(
-        f"                         \\bfseries Average & \\bfseries {overall_baseline * 100:.1f}\\% & \\bfseries {avg_c_str} & \\bfseries {avg_m_str} \\\\"
+    overall_baseline_std = _mean_col("baseline_bs_std")
+    overall_custom_std = _mean_col("custom_bs_std")
+    overall_mcts_std = _mean_col("mcts_bs_std")
+
+    # CI endpoints: pick any matching columns if present
+    overall_baseline_ci_l = _mean_col(
+        next((c for c in columns if c.startswith("baseline_ci_lower")), None)
     )
+    overall_baseline_ci_u = _mean_col(
+        next((c for c in columns if c.startswith("baseline_ci_upper")), None)
+    )
+
+    overall_custom_ci_l = _mean_col(
+        next((c for c in columns if c.startswith("custom_ci_lower")), None)
+    )
+    overall_custom_ci_u = _mean_col(
+        next((c for c in columns if c.startswith("custom_ci_upper")), None)
+    )
+
+    overall_mcts_ci_l = _mean_col(
+        next((c for c in columns if c.startswith("mcts_ci_lower")), None)
+    )
+    overall_mcts_ci_u = _mean_col(
+        next((c for c in columns if c.startswith("mcts_ci_upper")), None)
+    )
+
+    # Build formatted average strings
+    def _fmt_overall(val, std, ci_l, ci_u):
+        if val != val:
+            return "N/A"
+        v = val * 100
+        if show_ci and ci_l == ci_l and ci_u == ci_u:
+            return f"\\bfseries {v:.1f}\\% ({ci_l * 100:.1f}-{ci_u * 100:.1f}\\%)"
+        elif std == std:
+            return f"\\bfseries ${v:.1f}\\%\\pm{std * 100:.1f}\\%$"
+        else:
+            return f"\\bfseries {v:.1f}\\%"
+
+    avg_b = _fmt_overall(
+        overall_baseline,
+        overall_baseline_std,
+        overall_baseline_ci_l,
+        overall_baseline_ci_u,
+    )
+    avg_c = _fmt_overall(
+        overall_custom, overall_custom_std, overall_custom_ci_l, overall_custom_ci_u
+    )
+    avg_m = _fmt_overall(
+        overall_mcts, overall_mcts_std, overall_mcts_ci_l, overall_mcts_ci_u
+    )
+
+    # Insert delta info for custom/mcts in the average row (computed against baseline average)
+    if overall_baseline == overall_baseline:
+        delta_c = (
+            (overall_custom - overall_baseline) * 100
+            if overall_custom == overall_custom
+            else float("nan")
+        )
+        delta_m = (
+            (overall_mcts - overall_baseline) * 100
+            if overall_mcts == overall_mcts
+            else float("nan")
+        )
+    else:
+        delta_c = float("nan")
+        delta_m = float("nan")
+
+    # Append Average row: include delta in parentheses after the bolded value
+    # We remove trailing percent markers from avg_c/avg_m strings to append delta cleanly.
+    def _strip_bold_and_percent(s: str) -> str:
+        # s expected like "\\bfseries 55.3\\% (...)" or "\\bfseries $55.3\\%\\pm1.2\\%$"
+        return s.replace("\\bfseries ", "")
+
+    avg_c_core = _strip_bold_and_percent(avg_c)
+    avg_m_core = _strip_bold_and_percent(avg_m)
+
+    # Compose average row safely
+    if delta_c == delta_c:
+        avg_c_with_delta = f"{avg_c_core}"
+    else:
+        avg_c_with_delta = avg_c_core
+
+    if delta_m == delta_m:
+        avg_m_with_delta = f"{avg_m_core}"
+    else:
+        avg_m_with_delta = avg_m_core
+
+    avg_row = (
+        "                         \\bfseries Average & "
+        + avg_b
+        + " & \\bfseries "
+        + avg_c_with_delta
+        + " & \\bfseries "
+        + avg_m_with_delta
+        + " \\\\"
+    )
+
+    latex_rows.append(avg_row)
 
     table_body = "\n".join(latex_rows)
 
-    # The header omits a separate delta symbol since differences are presented as (+-%) next to the absolute values
     latex_template = f"""\\begin{{table}}[!t]
                          \\renewcommand{{\\arraystretch}}{{1.3}}
-                         \\caption{{Move-accuracy of the different models on the test set. Values in parentheses indicate the difference relative to Maia-2.}}
+                         \\caption{{Move-accuracy of the different models on the test set. Values following the $\\pm$ indicate the standard deviation.}}
                          \\label{{tab:move_accuracy}}
                          \\centering
+                         \\scriptsize
+                         \\setlength{{\\tabcolsep}}{{3pt}}
                          \\begin{{tabular}}{{l c c c}}
                          \\hline
-                         \\bfseries Player & \\bfseries Maia-2 & \\bfseries Maia-2 FT & \\bfseries Maia-2 FT + MCTS \\\\n                         \\hline\\hline
+                         \\bfseries Player & \\bfseries Maia-2 & \\bfseries Maia-2 FT & \\bfseries Maia-2 FT + MCTS \\\\
+                         \\hline\\hline
 {table_body}
                          \\hline
                          \\end{{tabular}}
                          \\end{{table}}"""
 
-    # Persist the accuracy table to the configured output location
     out_path = config.paths.accuracy_table_latex_path
 
     with open(out_path, "w", encoding="utf-8") as f:
